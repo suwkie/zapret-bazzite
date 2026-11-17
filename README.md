@@ -33,11 +33,26 @@ the default label it gets there.
 
 ## Install
 
+One file, no clone — the whole project is embedded in the script:
+
+```bash
+gh release download v0.2.0 --repo suwkie/zapret-bazzite   --pattern 'install-zapret-bazzite.sh' --dir /tmp
+sudo bash /tmp/install-zapret-bazzite.sh
+```
+
+From a clone, the same installer:
+
 ```bash
 gh repo clone suwkie/zapret-bazzite      # or: git clone https://github.com/suwkie/zapret-bazzite.git
 cd zapret-bazzite
 sudo ./install.sh
 ```
+
+`install-zapret-bazzite.sh` carries the engine installer, CLI, profiles, unit
+template and extras; it extracts to a temporary directory, installs, and points
+`state/source` at the installed copy so `sudo zapret-arch update` keeps working
+after the temp directory is gone. The desktop GUI is not inside it — take the
+GUI archive below, or build it from the clone.
 
 Do not pass `--start` on the first run: if the SELinux relabel did not take,
 the unit fails with `203/EXEC` and the installer rolls the whole tree back.

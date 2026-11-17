@@ -355,7 +355,11 @@ set_strategy "$strategy"
 set_games "$games"
 set_voice "$voice"
 set_minecraft "$minecraft"
-printf '%s\n' "$SCRIPT_DIR" > "$STATE_DIR/source"
+# A single-file installer runs from a temporary directory that is gone by the
+# time `zapret-arch update` is called; it asks for the installed copy instead.
+source_dir=${ZAPRET_SOURCE_DIR:-$SCRIPT_DIR}
+[[ $source_dir == self ]] && source_dir=$PREFIX/app
+printf '%s\n' "$source_dir" > "$STATE_DIR/source"
 
 install -m 0755 "$SCRIPT_DIR/zapret-arch" "$PREFIX/app/zapret-arch"
 install -m 0644 "$SCRIPT_DIR/lib/"*.sh "$PREFIX/app/lib/"
