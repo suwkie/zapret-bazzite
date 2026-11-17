@@ -1,0 +1,588 @@
+#!/usr/bin/env bash
+# zapret-arch: manage Flowseal DPI-bypass strategies on Arch Linux.
+set -euo pipefail
+
+SELF=$(readlink -f -- "${BASH_SOURCE[0]}")
+APP_DIR=$(cd -- "$(dirname -- "$SELF")" && pwd)
+if [[ -n ${ZAPRET_HOME:-} ]]; then
+  :
+elif [[ $(basename "$APP_DIR") == app ]]; then
+  ZAPRET_HOME=$(dirname "$APP_DIR")
+else
+  ZAPRET_HOME=/usr/local/lib/zapret-arch
+fi
+source "$APP_DIR/lib/common.sh"
+if [[ -f $APP_DIR/lib/tui.sh ]]; then
+  source "$APP_DIR/lib/tui.sh"
+fi
+
+MANAGED_PREFIX=/usr/local/lib/zapret-arch
+NFQWS_LINK=$ENGINE_DIR/nfq/nfqws
+NFQWS_PATTERN=$ENGINE_DIR/nfq/[n]fqws
+NFQWS_REAL=$(readlink -f -- "$NFQWS_LINK" 2>/dev/null || echo "$NFQWS_LINK")
+
+# Representative endpoints from Flowseal's utils/targets.txt.
+TARGETS=(
+  https://discord.com
+  https://www.youtube.com
+  https://youtu.be
+  https://www.google.com
+)
+
+usage() {
+  cat <<'EOF'
+Usage: zapret-arch [command]
+
+  (no command)        Interactive menu
+  list                List strategies; * marks the current one
+  probe               Show HTTP status/latency for the current strategy
+  use NAME            Apply a strategy, enable and restart the service
+  test [NAME...]      Probe Discord/YouTube/Google through each strategy
+  update [DIR]        Re-run the installer (recorded source, or DIR)
+  hosts [minecraft|roblox] on|off|check [IP]
+                     Pin hosts the ISP resolves wrongly in /etc/hosts
+  gui                 Open the desktop GUI
+  games on|off        Include TCP+UDP 1024-65535 for game traffic
+  voice on|off        Enable/disable Discord RTC (voice) desync
+  minecraft on|off    Add the Hypixel/Cloudflare bypass on TCP 25565
+  on                  Enable at boot and start
+  off                 Stop and disable at boot
+  autostart on|off    Change boot autostart only (does not start/stop)
+  status              Show service, nfqws and nftables state
+  help                This help
+
+Run with sudo (the CLI re-executes itself through sudo when needed).
+EOF
+}
+
+ensure_root() {
+  [[ $(id -u) -eq 0 ]] && return 0
+  [[ -t 0 ]] || die "Run as root: sudo zapret-arch $*"
+  exec sudo -- "$SELF" "$@"
+}
+
+require_managed_prefix() {
+  [[ $ZAPRET_HOME == "$MANAGED_PREFIX" ]] \
+    || die "Custom prefix installs are staging-only; manage their engine directly."
+}
+
+service_active() {
+  systemctl is-active --quiet "$UNIT_NAME" 2>/dev/null
+}
+
+require_unit() {
+  systemctl cat "$UNIT_NAME" >/dev/null 2>&1 \
+    || die "$UNIT_NAME is not installed. Run: sudo $ZAPRET_HOME/app/install.sh"
+}
+
+own_pids() {
+  pgrep -f "$NFQWS_PATTERN" 2>/dev/null || true
+}
+
+foreign_nfqws() {
+  local pid exe
+  for pid in $(pgrep -x nfqws 2>/dev/null); do
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+    case $exe in
+      "$NFQWS_REAL"|"$NFQWS_REAL (deleted)") ;;
+      *) printf '%s %s\n' "$pid" "${exe:-unknown}" ;;
+    esac
+  done
+}
+
+queue_loaded() {
+  local rc=0
+  nft_queue_loaded || rc=$?
+  (( rc == 2 )) && return 0   # unprivileged: unknown, never report it as a failure
+  return "$rc"
+}
+
+# Refuse to fight another nfqws for the same queue, and clear stale rules
+# left by a crashed run. Requires root.
+preflight() {
+  local foreign
+  foreign=$(foreign_nfqws)
+  [[ -z $foreign ]] || die "Another nfqws is running (pid path): $foreign. Stop it first."
+  if ! pgrep -x nfqws >/dev/null && nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
+    nft delete table inet "$NFT_TABLE" 2>/dev/null || true
+  fi
+}
+
+wait_active() {
+  local i
+  for i in {1..20}; do
+    service_active \
+      && pgrep -f "$NFQWS_PATTERN" >/dev/null \
+      && queue_loaded \
+      && return 0
+    sleep 0.3
+  done
+  # Say which condition is failing, so the next failure is diagnosable.
+  service_active || printf 'diag: service is not active\n' >&2
+  pgrep -f "$NFQWS_PATTERN" >/dev/null || printf 'diag: no nfqws process matching %s\n' "$NFQWS_PATTERN" >&2
+  queue_loaded || printf 'diag: queue %s is not in nft table %s\n' "$NFQUEUE_NUM" "$NFT_TABLE" >&2
+  return 1
+}
+
+cmd_list() {
+  local file name current marker
+  [[ -d $PROFILES_DIR ]] || die "Not installed: $PROFILES_DIR is missing"
+  current=$(current_strategy)
+  printf 'current: %s   games: %s   voice: %s   minecraft: %s\n\n' \
+    "${current:-none}" "$(current_games)" "$(current_voice)" "$(current_minecraft)"
+  for file in "$PROFILES_DIR"/*.opt; do
+    [[ -f $file ]] || continue
+    name=$(basename "$file" .opt)
+    marker=' '
+    [[ $name == "$current" ]] && marker='*'
+    printf '%s %s\n' "$marker" "$name"
+  done
+}
+
+cmd_use() {
+  local name=${1:-} prev prev_games prev_voice prev_minecraft
+  [[ -n $name ]] || die "Strategy name required. See: zapret-arch list"
+  profile_exists "$name" || die "Unknown strategy: $name (see: zapret-arch list)"
+  require_unit
+  preflight
+  prev=$(current_strategy)
+  prev_games=$(current_games)
+  prev_voice=$(current_voice)
+  prev_minecraft=$(current_minecraft)
+
+  write_config "$name" "$prev_games" "$prev_voice" "$prev_minecraft"
+  set_strategy "$name"
+  systemctl restart "$UNIT_NAME" || true
+  if ! wait_active; then
+    journalctl -u "$UNIT_NAME" -n 20 --no-pager >&2 || true
+    if [[ -n $prev ]]; then
+      warn "Strategy failed; restoring $prev"
+      write_config "$prev" "$prev_games" "$prev_voice" "$prev_minecraft"
+      set_strategy "$prev"
+      systemctl restart "$UNIT_NAME" >/dev/null 2>&1 || true
+      wait_active || warn "Could not restore the previous strategy"
+    else
+      systemctl stop "$UNIT_NAME" >/dev/null 2>&1 || true
+      rm -f "$STATE_DIR/strategy"
+    fi
+    die "Service failed to start with strategy: $name"
+  fi
+  systemctl enable "$UNIT_NAME" >/dev/null 2>&1 || warn "Could not enable $UNIT_NAME at boot"
+  log "Strategy: $name (games: $prev_games, voice: $prev_voice, minecraft: $prev_minecraft)"
+}
+
+cmd_on() {
+  local strategy
+  require_unit
+  strategy=$(current_strategy)
+  profile_exists "$strategy" || die "No valid strategy selected. Run: zapret-arch use <name>"
+  preflight
+  if service_active && ! queue_loaded; then
+    systemctl restart "$UNIT_NAME" || true
+  else
+    systemctl start "$UNIT_NAME" || true
+  fi
+  wait_active || die "Service failed to start. See: journalctl -u $UNIT_NAME -n 30"
+  systemctl enable "$UNIT_NAME" >/dev/null 2>&1 || warn "Could not enable $UNIT_NAME at boot"
+  log "Bypass is on (strategy: $strategy)"
+}
+
+cmd_off() {
+  local i
+  systemctl disable --now "$UNIT_NAME" >/dev/null 2>&1 || true
+  # Stop only this install's daemon. The upstream pidfile is shared with
+  # /opt/zapret, so init.d stop can kill the other install.
+  for i in {1..10}; do
+    pgrep -f "$NFQWS_PATTERN" >/dev/null || break
+    sleep 0.3
+  done
+  if pgrep -f "$NFQWS_PATTERN" >/dev/null; then
+    warn "nfqws did not exit; terminating this install's process"
+    pkill -f "$NFQWS_PATTERN" 2>/dev/null || true
+    sleep 0.5
+  fi
+  # The table is namespaced and ours. Keep it while this install's nfqws is
+  # still alive; otherwise a dead queue 201 stays behind with bypass.
+  if pgrep -f "$NFQWS_PATTERN" >/dev/null; then
+    die "Could not stop nfqws"
+  fi
+  if nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
+    nft delete table inet "$NFT_TABLE" 2>/dev/null || true
+  fi
+  log "Bypass is off and disabled at boot"
+}
+
+cmd_update() {
+  local src=${1:-} fallback=$APP_DIR/install.sh
+
+  if [[ -z $src ]]; then
+    src=$(cat "$STATE_DIR/source" 2>/dev/null || true)
+  fi
+  if [[ -n $src && -x $src/install.sh ]]; then
+    log "Updating from $src"
+    exec "$src/install.sh"
+  fi
+  if [[ -x $fallback ]]; then
+    warn "No source recorded; running the installed installer $fallback"
+    exec "$fallback"
+  fi
+  die "No updater found. Run the source install.sh with sudo."
+}
+
+cmd_hosts() {
+  local group=${1:-minecraft} mode=${2:-on} ip=${3:-} script=$APP_DIR/extras/hosts-pin.sh
+  case $group in
+    minecraft|roblox) ;;
+    *) die "Unknown host group: $group (minecraft|roblox)" ;;
+  esac
+  case $mode in
+    on|off|check) ;;
+    *) die "Usage: zapret-arch hosts [minecraft|roblox] on|off|check [IP]" ;;
+  esac
+  [[ -x $script ]] || die "Missing $script; re-run install.sh"
+  "$script" "$group" "$mode" "$ip"
+}
+
+cmd_autostart() {
+  local mode=${1:-}
+  [[ $mode == on || $mode == off ]] || die "Usage: zapret-arch autostart on|off"
+  require_unit
+  if [[ $mode == on ]]; then
+    systemctl enable "$UNIT_NAME" >/dev/null 2>&1 || die "Could not enable $UNIT_NAME"
+  else
+    systemctl disable "$UNIT_NAME" >/dev/null 2>&1 || die "Could not disable $UNIT_NAME"
+  fi
+  if service_active; then
+    log "Autostart: $mode (service is still active)"
+  else
+    log "Autostart: $mode (service is stopped)"
+  fi
+}
+
+cmd_games() {
+  local mode=${1:-} strategy prev_mode voice minecraft
+  [[ $mode == on || $mode == off ]] || die "Usage: zapret-arch games on|off"
+  strategy=$(current_strategy)
+  profile_exists "$strategy" || die "No valid strategy selected. Run: zapret-arch use <name>"
+  preflight
+  prev_mode=$(current_games)
+  voice=$(current_voice)
+  minecraft=$(current_minecraft)
+  validate_effective_config "$strategy" "$mode" "$voice" "$minecraft" \
+    || die "nfqws rejected the config for games $mode"
+  write_config "$strategy" "$mode" "$voice" "$minecraft"
+  set_games "$mode"
+  if service_active; then
+    systemctl restart "$UNIT_NAME" || true
+    if ! wait_active; then
+      write_config "$strategy" "$prev_mode" "$voice" "$minecraft"
+      set_games "$prev_mode"
+      systemctl restart "$UNIT_NAME" >/dev/null 2>&1 || true
+      wait_active || warn "Rollback to games $prev_mode failed; service is down"
+      die "Service failed to restart with games $mode (rolled back to $prev_mode). See: journalctl -u $UNIT_NAME -n 30"
+    fi
+  fi
+  log "Game filter: $mode (strategy: $strategy)"
+}
+
+cmd_voice() {
+  local mode=${1:-} strategy prev_mode games minecraft
+  [[ $mode == on || $mode == off ]] || die "Usage: zapret-arch voice on|off"
+  strategy=$(current_strategy)
+  profile_exists "$strategy" || die "No valid strategy selected. Run: zapret-arch use <name>"
+  preflight
+  prev_mode=$(current_voice)
+  games=$(current_games)
+  minecraft=$(current_minecraft)
+  validate_effective_config "$strategy" "$games" "$mode" "$minecraft" \
+    || die "nfqws rejected the config for voice $mode"
+  write_config "$strategy" "$games" "$mode" "$minecraft"
+  set_voice "$mode"
+  if service_active; then
+    systemctl restart "$UNIT_NAME" || true
+    if ! wait_active; then
+      write_config "$strategy" "$games" "$prev_mode" "$minecraft"
+      set_voice "$prev_mode"
+      systemctl restart "$UNIT_NAME" >/dev/null 2>&1 || true
+      wait_active || warn "Rollback to voice $prev_mode failed; service is down"
+      die "Service failed to restart with voice $mode (rolled back to $prev_mode). See: journalctl -u $UNIT_NAME -n 30"
+    fi
+  fi
+  log "Discord RTC handling: $mode (strategy: $strategy)"
+}
+
+cmd_minecraft() {
+  local mode=${1:-} strategy prev_mode games voice
+  [[ $mode == on || $mode == off ]] || die "Usage: zapret-arch minecraft on|off"
+  strategy=$(current_strategy)
+  profile_exists "$strategy" || die "No valid strategy selected. Run: zapret-arch use <name>"
+  require_unit
+  preflight
+  prev_mode=$(current_minecraft)
+  games=$(current_games)
+  voice=$(current_voice)
+  validate_effective_config "$strategy" "$games" "$voice" "$mode" \
+    || die "nfqws rejected the config for minecraft $mode"
+  write_config "$strategy" "$games" "$voice" "$mode"
+  set_minecraft "$mode"
+  if service_active; then
+    systemctl restart "$UNIT_NAME" || true
+    if ! wait_active; then
+      write_config "$strategy" "$games" "$voice" "$prev_mode"
+      set_minecraft "$prev_mode"
+      systemctl restart "$UNIT_NAME" >/dev/null 2>&1 || true
+      wait_active || warn "Rollback to minecraft $prev_mode failed; service is down"
+      die "Service failed to restart with minecraft $mode (rolled back to $prev_mode). See: journalctl -u $UNIT_NAME -n 30"
+    fi
+  fi
+  log "Minecraft/Hypixel bypass: $mode (strategy: $strategy)"
+}
+
+probe_result() {
+  local url=$1 out
+  out=$(curl -4 -m 5 -s -o /dev/null -w '%{http_code} %{time_total}' "$url" 2>/dev/null) \
+    || out='000 0'
+  printf '%s\n' "${out:-000 0}"
+}
+
+probe_code() {
+  probe_result "$1" | awk '{print $1}'
+}
+
+cmd_probe() {
+  local strategy url code secs status
+  strategy=$(current_strategy)
+  profile_exists "$strategy" || die "No valid strategy selected. Run: zapret-arch use <name>"
+  printf 'strategy: %s\n\n' "$strategy"
+  for url in "${TARGETS[@]}"; do
+    read -r code secs < <(probe_result "$url") || true
+    if [[ -z $code || $code == 000 ]]; then
+      status='FAIL (no HTTP response)'
+    elif [[ $code =~ ^[23] ]]; then
+      status='ok'
+    else
+      status="reachable (HTTP $code)"
+    fi
+    printf '%-40s %-4s %ss  %s\n' "$url" "$code" "$secs" "$status"
+  done
+}
+
+cmd_test() {
+  local -a requested=("$@") names=() results=()
+  local file name prev prev_games prev_voice prev_minecraft was_active=0 pass total url code
+  local -a failed=()
+  local i=0 test_done=0
+
+  require_unit
+  [[ -d $PROFILES_DIR ]] || die "Not installed: $PROFILES_DIR is missing"
+
+  if (( ${#requested[@]} == 0 )) || [[ ${requested[0]} == all ]]; then
+    for file in "$PROFILES_DIR"/*.opt; do
+      [[ -f $file ]] || continue
+      names+=("$(basename "$file" .opt)")
+    done
+  else
+    for name in "${requested[@]}"; do
+      profile_exists "$name" || die "Unknown strategy: $name"
+      names+=("$name")
+    done
+  fi
+  (( ${#names[@]} > 0 )) || die "No strategies found in $PROFILES_DIR"
+
+  prev=$(current_strategy)
+  profile_exists "$prev" || prev=${names[0]}
+  prev_games=$(current_games)
+  prev_voice=$(current_voice)
+  prev_minecraft=$(current_minecraft)
+  service_active && was_active=1
+  preflight
+
+  test_restore() {
+    local rc=$?
+    trap - EXIT INT TERM
+    if (( test_done == 0 )); then
+      write_config "$prev" "$prev_games" "$prev_voice" "$prev_minecraft" 2>/dev/null || true
+      set_strategy "$prev" 2>/dev/null || true
+      if (( was_active )); then
+        systemctl restart "$UNIT_NAME" >/dev/null 2>&1 || true
+        wait_active || warn "Could not restore the previous strategy"
+      else
+        systemctl stop "$UNIT_NAME" >/dev/null 2>&1 || true
+      fi
+    fi
+    exit "$rc"
+  }
+  trap test_restore EXIT INT TERM
+
+  log "Testing ${#names[@]} strategies against ${#TARGETS[@]} endpoints (about $(( ${#names[@]} * 10 ))s)"
+  for name in "${names[@]}"; do
+    i=$((i + 1))
+    printf '[%d/%d] %-40s ' "$i" "${#names[@]}" "$name"
+    write_config "$name" "$prev_games" "$prev_voice" "$prev_minecraft"
+    set_strategy "$name"
+    systemctl restart "$UNIT_NAME" 2>/dev/null || true
+    if ! wait_active; then
+      printf 'FAIL (service)\n'
+      results+=("$name FAIL")
+      continue
+    fi
+    pass=0
+    total=0
+    failed=()
+    for url in "${TARGETS[@]}"; do
+      total=$((total + 1))
+      code=$(probe_code "$url")
+      if [[ -n $code && $code != 000 ]]; then
+        pass=$((pass + 1))
+      else
+        failed+=("$url ($code)")
+      fi
+    done
+    printf '%s/%s' "$pass" "$total"
+    if (( ${#failed[@]} )); then
+      printf '  failed: %s' "${failed[*]}"
+    fi
+    printf '\n'
+    results+=("$name $pass/$total")
+  done
+
+  write_config "$prev" "$prev_games" "$prev_voice" "$prev_minecraft"
+  set_strategy "$prev"
+  if (( was_active )); then
+    systemctl restart "$UNIT_NAME" >/dev/null 2>&1 || true
+    wait_active || warn "Could not restore the previous strategy"
+  else
+    systemctl stop "$UNIT_NAME" >/dev/null 2>&1 || true
+  fi
+  mkdir -p "$STATE_DIR"
+  merge_test_results "$STATE_DIR/test-results" "${results[@]}" \
+    || warn "Could not save test results to $STATE_DIR/test-results"
+  test_done=1
+  trap - EXIT INT TERM
+
+  printf '\nResults (HTTP response received):\n'
+  printf '  %s\n' "${results[@]}"
+  log "Restored strategy: $prev (games: $prev_games, voice: $prev_voice, minecraft: $prev_minecraft)"
+}
+
+cmd_status() {
+  local strategy games voice minecraft pids foreign
+  strategy=$(current_strategy)
+  games=$(current_games)
+  voice=$(current_voice)
+  minecraft=$(current_minecraft)
+  pids=$(own_pids)
+  foreign=""
+  [[ $(id -u) -eq 0 ]] && foreign=$(foreign_nfqws)
+  printf 'strategy : %s\n' "${strategy:-none}"
+  printf 'games    : %s\n' "$games"
+  printf 'voice    : %s\n' "$voice"
+  printf 'minecraft: %s\n' "$minecraft"
+  if [[ $ZAPRET_HOME == "$MANAGED_PREFIX" ]]; then
+    printf 'autostart: %s\n' "$(systemctl is-enabled "$UNIT_NAME" 2>/dev/null || echo disabled)"
+  fi
+  if [[ $ZAPRET_HOME == "$MANAGED_PREFIX" ]]; then
+    service_active && printf 'service  : active\n' || printf 'service  : inactive\n'
+  else
+    printf 'service  : staging (not managed)\n'
+  fi
+  if [[ -n $pids ]]; then
+    printf 'nfqws    : pid %s\n' "$(printf '%s' "$pids" | tr '\n' ' ')"
+  else
+    printf 'nfqws    : not running\n'
+  fi
+  if [[ -n $foreign ]]; then
+    printf 'foreign  : %s\n' "$foreign"
+  fi
+  if ! nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
+    printf 'nftables : no rules (or run as root)\n'
+  elif queue_loaded; then
+    printf 'nftables : queue %s loaded\n' "$NFQUEUE_NUM"
+  else
+    printf 'nftables : table present, no queue rule\n'
+  fi
+}
+
+cmd_menu_plain() {
+  local choice name current
+  while true; do
+    printf '\n=== zapret-arch ===\n'
+    printf 'strategy: %s   games: %s   voice: %s   mc: %s   service: %s\n\n' \
+      "$(current_strategy)" "$(current_games)" "$(current_voice)" \
+      "$(current_minecraft)" \
+      "$(service_active && echo active || echo inactive)"
+    cat <<'EOF'
+1) Apply / restart current strategy
+2) Choose a strategy
+3) Test strategies
+4) Turn bypass on
+5) Turn bypass off
+6) Toggle game filter
+7) Toggle Discord RTC handling
+8) Toggle Minecraft/Hypixel bypass
+9) Status
+10) List strategies
+0) Exit
+EOF
+    read -rp 'Select: ' choice || exit 0
+    case $choice in
+      1)
+        current=$(current_strategy)
+        if [[ -n $current ]]; then cmd_use "$current"; else warn "No strategy selected"; fi
+        ;;
+      2) cmd_list; read -rp 'Strategy name: ' name; [[ -n $name ]] && cmd_use "$name" ;;
+      3) cmd_test ;;
+      4) cmd_on ;;
+      5) cmd_off ;;
+      6) [[ $(current_games) == on ]] && cmd_games off || cmd_games on ;;
+      7) [[ $(current_voice) == on ]] && cmd_voice off || cmd_voice on ;;
+      8) [[ $(current_minecraft) == on ]] && cmd_minecraft off || cmd_minecraft on ;;
+      9) cmd_status ;;
+      10) cmd_list ;;
+      0) exit 0 ;;
+      *) warn "Unknown choice: $choice" ;;
+    esac
+    [[ $choice == 0 ]] || read -rp 'Press Enter to continue...' _ || true
+  done
+}
+
+cmd_menu() {
+  if declare -F cmd_tui >/dev/null && tui_available; then
+    cmd_tui
+  else
+    cmd_menu_plain
+  fi
+}
+
+case ${1:-menu} in
+  menu) require_managed_prefix; ensure_root "$@"; cmd_menu ;;
+  list|ls) cmd_list ;;
+  probe) cmd_probe ;;
+  use) require_managed_prefix; ensure_root "$@"; cmd_use "${2:-}" ;;
+  test) require_managed_prefix; ensure_root "$@"; shift; cmd_test "$@" ;;
+  update) require_managed_prefix; ensure_root "$@"; cmd_update "${2:-}" ;;
+  gui) shift
+       [[ -x /usr/bin/zapret-arch-gui ]] \
+         || die "Desktop GUI is not installed. Run: sudo $APP_DIR/install.sh --with-gui"
+       exec /usr/bin/zapret-arch-gui "$@" ;;
+  hosts) require_managed_prefix
+         case ${2:-} in
+           minecraft|roblox) hgroup=$2 hmode=${3:-on} hip=${4:-} ;;
+           *) hgroup=minecraft hmode=${2:-on} hip=${3:-} ;;
+         esac
+         case $hmode in
+           on|off) ensure_root "$@" ;;
+           check) ;;
+           *) die "Usage: zapret-arch hosts [minecraft|roblox] on|off|check [IP]" ;;
+         esac
+         cmd_hosts "$hgroup" "$hmode" "$hip" ;;
+  games) require_managed_prefix; ensure_root "$@"; cmd_games "${2:-}" ;;
+  voice) require_managed_prefix; ensure_root "$@"; cmd_voice "${2:-}" ;;
+  minecraft|mc) require_managed_prefix; ensure_root "$@"; cmd_minecraft "${2:-}" ;;
+  on) require_managed_prefix; ensure_root "$@"; cmd_on ;;
+  off) require_managed_prefix; ensure_root "$@"; cmd_off ;;
+  autostart) require_managed_prefix; ensure_root "$@"; cmd_autostart "${2:-}" ;;
+  status|st) cmd_status ;;
+  -h|--help|help) usage ;;
+  *) die "Unknown command: $1 (see: zapret-arch --help)" ;;
+esac

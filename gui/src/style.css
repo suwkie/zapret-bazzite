@@ -1,0 +1,308 @@
+/* ---------------------------------------------------------------------------
+   zapret-arch — kitty-flavoured skin, GTK4, plain widgets, no libadwaita.
+
+   The palette is kitty 0.50's built-in default, read from
+   /usr/lib/kitty/kitty/options/definition.py, so the window matches the
+   terminal next to it:
+     bg #000000 · fg #dddddd · cursor #cccccc
+     color0 #000000  color1 #cc0403  color2 #19cb00  color3 #cecb00
+     color4 #0d73cc  color5 #cb1ed1  color6 #0dcdcd  color7 #dddddd
+     color8 #767676  color9 #f2201f  color10 #23fd00 color11 #fffd00
+     color12 #1a8fff color13 #fd28ff color14 #14ffff color15 #ffffff
+     selection_background #fffacd · selection_foreground #000000
+
+   Surfaces that kitty does not have (panels, buttons) are lifted a few points
+   off black so the structure stays readable. Sizes in pt, spacing in px.
+--------------------------------------------------------------------------- */
+
+@define-color bg         #000000;
+@define-color surface    #0a0a0a;
+@define-color raised     #151515;
+@define-color border     #262626;
+@define-color border_hi  #3a3a3a;
+@define-color text       #dddddd;
+@define-color text_dim   #767676;
+@define-color ok         #19cb00;
+@define-color ok_bright  #23fd00;
+@define-color warn       #cecb00;
+@define-color error      #f2201f;
+@define-color sel_bg     #fffacd;
+@define-color sel_text   #000000;
+@define-color focus      #1a8fff;
+
+/* ---- window ------------------------------------------------------------ */
+
+window {
+  font-family: "Iosevka", "DejaVu Sans Mono", monospace;
+  font-size: 10pt;
+  background-color: @bg;
+  color: @text;
+}
+
+headerbar {
+  background-color: @bg;
+  background-image: none;
+  border-bottom: 1px solid @border;
+  box-shadow: none;
+  padding: 0 6px;
+  min-height: 30px;
+}
+
+headerbar .title {
+  font-size: 10pt;
+  font-weight: 700;
+  color: @text_dim;
+  padding-left: 6px;
+}
+
+/* Only our own header button: the window controls keep the theme's icon
+   painting, otherwise close/minimise/maximise disappear. */
+headerbar button.hdr-btn {
+  min-height: 28px;
+  min-width: 28px;
+  padding: 0 6px;
+  color: @text_dim;
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+}
+
+headerbar button.hdr-btn:hover { background-color: @raised; color: @text; }
+headerbar button.hdr-btn:active { background-color: #202020; }
+
+/* Caption buttons are ours, drawn as text: the icon theme's window-close
+   glyphs carry their own dark colour and vanish on a black bar. */
+headerbar .winbtn {
+  min-width: 30px;
+  min-height: 28px;
+  padding: 0;
+  background: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  color: @text_dim;
+  font-weight: 700;
+}
+headerbar .winbtn:hover { background-color: @raised; color: @text; }
+headerbar .winbtn.close:hover { background-color: @error; color: #000000; }
+
+/* ---- type utilities ---------------------------------------------------- */
+
+.title-3   { font-size: 12pt; font-weight: 700; }
+.heading   { font-weight: 700; }
+.caption   { font-size: 10pt; }
+.dim-label { color: @text_dim; }
+.monospace { font-family: "Iosevka", "DejaVu Sans Mono", monospace; }
+
+/* ---- buttons ----------------------------------------------------------- */
+
+button {
+  min-height: 32px;
+  min-width: 32px;
+  padding: 0 10px;
+  color: @text;
+  background-color: @surface;
+  background-image: none;
+  border: 1px solid @border;
+  border-radius: 0;
+  box-shadow: none;
+  font-weight: 400;
+}
+
+button:hover  { background-color: @raised; border-color: @border_hi; }
+button:active { background-color: #202020; }
+button:disabled {
+  background-color: #050505;
+  border-color: #1a1a1a;
+  color: @text_dim;
+}
+button:focus-visible {
+  outline: 2px solid @focus;
+  outline-offset: -2px;
+}
+
+button.flat {
+  background-color: transparent;
+  border-color: transparent;
+}
+button.flat:hover  { background-color: @raised; border-color: @border; }
+button.flat:active { background-color: #202020; }
+
+/* section-header buttons are 24 px tall like their row, not 32 */
+button.flat.caption { min-height: 24px; padding: 0 6px; }
+
+/* one accent on screen at a time: the on/off button while stopped */
+button.suggested-action {
+  background-color: @ok;
+  border-color: @ok;
+  color: #000000;
+  font-weight: 700;
+}
+button.suggested-action:hover { background-color: @ok_bright; border-color: @ok_bright; }
+button.suggested-action:disabled {
+  background-color: #0a1400;
+  border-color: #1a2a10;
+  color: @text_dim;
+}
+
+/* global flags — mono means bold costs no width, so no reflow on toggle */
+button:checked {
+  background-color: #041000;
+  border-color: @ok;
+  color: @ok;
+  font-weight: 700;
+}
+button:checked:disabled {
+  background-color: #060a04;
+  border-color: #1a2a10;
+  color: @text_dim;
+}
+
+/* ---- status strip ------------------------------------------------------ */
+
+.status-strip {
+  background-color: @surface;
+  border: 1px solid @border;
+  border-radius: 0;
+  padding: 6px 12px;
+}
+
+.status-strip label.heading { color: @text; }
+
+/* ---- strategy list ----------------------------------------------------- */
+
+list {
+  background-color: @bg;
+  color: @text;
+}
+
+/* horizontal padding lives here; the row's inner Box has no margins */
+list row {
+  min-height: 32px;
+  padding: 0 8px;
+  background-color: transparent;
+  border-left: 2px solid transparent;
+  color: @text;
+}
+
+list row:hover { background-color: #111111; }
+list row:focus-visible { outline: 2px solid @focus; outline-offset: -2px; }
+
+/* kitty's own selection colours: pale yellow block, black text */
+list row:selected {
+  background-color: @sel_bg;
+  border-left: 2px solid @ok;
+  color: @sel_text;
+}
+list row:selected .dim-label { color: @sel_text; opacity: 0.55; }
+list row:selected image      { color: @sel_text; }
+/* the ✓ must survive selection: at equal specificity this rule wins over the
+   one above, so keep it last */
+list row:selected image.applied { color: @sel_text; }
+
+list row image.applied { color: @ok; }
+
+/* ---- separators and the paned handles ---------------------------------- */
+
+separator {
+  background-color: @border;
+  min-width: 1px;
+  min-height: 1px;
+}
+
+/* The panes still drag, but no divider is painted between them. */
+paned > separator {
+  background: none;
+  border: none;
+  min-width: 8px;
+  min-height: 8px;
+}
+
+/* ---- progress (apply / on / off only; the test modal has no bar) ------- */
+
+progressbar { min-width: 120px; min-height: 6px; }
+progressbar trough {
+  background-color: #111111;
+  border: 1px solid @border;
+  border-radius: 0;
+  min-height: 6px;
+}
+progressbar progress {
+  background-color: @ok;
+  border-radius: 0;
+  min-height: 6px;
+}
+
+/* ---- log pane ---------------------------------------------------------- */
+
+.log-pane {
+  background-color: @bg;
+  border: 1px solid @border;
+  border-radius: 0;
+  padding: 6px 0;
+}
+
+textview,
+textview > text {
+  background-color: @bg;
+  color: @text;
+}
+
+textview:focus-visible {
+  outline: 1px solid @focus;
+  outline-offset: -1px;
+}
+
+textview selection {
+  background-color: @sel_bg;
+  color: @sel_text;
+}
+
+/* ---- scrollbars -------------------------------------------------------- */
+
+/* No scrollbars at all: wheel, touchpad and keyboard scroll, the bars never
+   appear. Overlay scrolling stays on so nothing reserves a gutter. */
+scrollbar,
+scrollbar trough,
+scrollbar slider {
+  background: none;
+  border: none;
+  min-width: 0;
+  min-height: 0;
+  opacity: 0;
+}
+
+/* ---- error banner ------------------------------------------------------ */
+
+.error-banner {
+  background-color: #1a0000;
+  border-bottom: 1px solid @error;
+  padding: 6px 12px;
+  color: #ffd7d7;
+}
+.error-banner image { color: @error; }
+.error-banner button {
+  background-color: transparent;
+  border-color: transparent;
+  color: #ffd7d7;
+}
+.error-banner button:hover {
+  background-color: #2a0000;
+  border-color: @error;
+}
+
+/* ---- tooltip ----------------------------------------------------------- */
+
+tooltip {
+  background-color: @surface;
+  color: @text;
+  border: 1px solid @border;
+  border-radius: 0;
+}
+
+/* ---- semantic colours (applied from code) ------------------------------ */
+
+.state-ok    { color: @ok; }
+.state-warn  { color: @warn; }
+.state-error { color: @error; }

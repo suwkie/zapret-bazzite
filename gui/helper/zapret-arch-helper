@@ -1,0 +1,58 @@
+#!/bin/sh
+# Root helper for zapret-arch-gui on Bazzite. /usr is read-only there, so the
+# polkit action cannot be installed; the GUI calls this file through a sudo
+# drop-in that names this exact path. Every argument is validated here and
+# nothing is interpolated into a shell string.
+set -eu
+
+ZAPRET=/usr/local/lib/zapret-arch/app/zapret-arch
+PROFILES=/usr/local/lib/zapret-arch/profiles
+SLUG_RE='^[a-z0-9][a-z0-9-]*$'
+
+die() { printf 'helper: %s\n' "$*" >&2; exit 2; }
+
+[ "$(id -u)" -eq 0 ] || die "must run as root (sudo -n)"
+[ -x "$ZAPRET" ] || die "zapret-arch is not installed"
+
+verb=${1:-}
+[ $# -gt 0 ] && shift
+
+case $verb in
+  apply)
+    slug=${1:-}
+    [ -n "$slug" ] || die "apply: strategy required"
+    printf '%s\n' "$slug" | grep -Eq "$SLUG_RE" || die "apply: bad strategy name"
+    [ -f "$PROFILES/$slug.opt" ] || die "apply: unknown strategy"
+    exec "$ZAPRET" use "$slug"
+    ;;
+  on|off)
+    [ $# -eq 0 ] || die "$verb: no arguments"
+    exec "$ZAPRET" "$verb"
+    ;;
+  preset)
+    name=${1:-} mode=${2:-}
+    case $name in games|voice|minecraft) ;; *) die "preset: unknown preset" ;; esac
+    case $mode in on|off) ;; *) die "preset: mode must be on or off" ;; esac
+    [ $# -eq 2 ] || die "preset: expected <games|voice|minecraft> <on|off>"
+    exec "$ZAPRET" "$name" "$mode"
+    ;;
+  test)
+    target=${1:-all}
+    [ $# -le 1 ] || die "test: too many arguments"
+    case $target in
+      all) ;;
+      *) printf '%s\n' "$target" | grep -Eq "$SLUG_RE" || die "test: bad strategy name"
+         [ -f "$PROFILES/$target.opt" ] || die "test: unknown strategy" ;;
+    esac
+    exec "$ZAPRET" test "$target"
+    ;;
+  hosts)
+    mode=${1:-}
+    case $mode in on|off) ;; *) die "hosts: mode must be on or off" ;; esac
+    [ $# -eq 1 ] || die "hosts: too many arguments"
+    exec "$ZAPRET" hosts "$mode"
+    ;;
+  *)
+    die "unknown verb: ${verb:-<none>}"
+    ;;
+esac

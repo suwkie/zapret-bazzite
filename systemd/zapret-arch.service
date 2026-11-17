@@ -1,0 +1,22 @@
+[Unit]
+Description=zapret DPI bypass (Flowseal strategies)
+Documentation=https://github.com/Flowseal/zapret-discord-youtube
+After=network-online.target nftables.service
+PartOf=nftables.service
+Wants=network-online.target
+Conflicts=zapret.service zapret_discord_youtube.service
+
+[Service]
+Type=forking
+ExecStartPre=/bin/sh -c 'for p in $(pgrep -x nfqws); do e=$(readlink /proc/$p/exe 2>/dev/null); case "$e" in "@NFQWS_REAL@"|"@NFQWS_REAL@ (deleted)") ;; *) echo "foreign nfqws $p ($e); stop it first" >&2; exit 1;; esac; done'
+ExecStartPre=/bin/sh -c 'pgrep -x nfqws >/dev/null || nft delete table inet @NFT_TABLE@ 2>/dev/null || true'
+ExecStart=@PREFIX@/engine/init.d/sysv/zapret start
+ExecStartPost=/bin/sh -c 'pgrep -f "@PREFIX@/engine/nfq/[n]fqws" >/dev/null || { @PREFIX@/engine/init.d/sysv/zapret stop; exit 1; }'
+ExecStartPost=/bin/sh -c 'nft list table inet @NFT_TABLE@ 2>/dev/null | grep -q "queue.*@NFQUEUE_NUM@" || { @PREFIX@/engine/init.d/sysv/zapret stop; exit 1; }'
+ExecStop=/bin/sh -c 'pkill -f "@PREFIX@/engine/nfq/[n]fqws" || true'
+ExecStopPost=/bin/sh -c 'nft delete table inet @NFT_TABLE@ 2>/dev/null || true'
+TimeoutSec=30
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

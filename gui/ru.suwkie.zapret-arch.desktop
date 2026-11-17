@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Zapret Arch
+GenericName=DPI bypass
+GenericName[ru]=Обход блокировок
+Comment=DPI bypass strategies without a VPN
+Comment[ru]=Стратегии обхода DPI без VPN
+Icon=ru.suwkie.zapret-arch
+Exec=zapret-arch-gui
+TryExec=zapret-arch-gui
+StartupWMClass=ru.suwkie.zapret-arch
+Categories=Network;
+Keywords=zapret;dpi;youtube;discord;bypass;
+Keywords[ru]=zapret;обход;dpi;youtube;discord;
+StartupNotify=true
+Terminal=false
