@@ -348,6 +348,13 @@ sudo nft list table inet zapret_arch
   The edge list ages — if icons break again, re-read it with
   `dig +short A tr.rbxcdn.com @9.9.9.9` and pass the address:
   `sudo zapret-arch hosts roblox on <ip>`.
+- **Spotify shows no icons and plays nothing**: the client's hosts match no
+  zapret list, so `nfqws` never touches them; the ISP drops the ClientHello
+  for `i.scdn.co` and stalls the `ap-*.spotify.com` access points from
+  `apresolve`, while the audio CDNs answer. Two bare lines cover the family and
+  the installer seeds them; on an existing install append `scdn.co` and
+  `spotify.com` to `/usr/local/lib/zapret-arch/lists/list-general-user.txt`
+  and restart the unit.
 - **YouTube needs an immediate click when a preview appears**: the muted
   hover/feed preview starts a media connection; if that first connection
   stalls through the DPI path, the full player inherits it. Turn off YouTube

@@ -323,7 +323,8 @@ done
 # Seed the preserved user list with the DPI-blocked Modrinth apex. Its
 # subdomains (api/cdn/docs/www) work directly and are deliberately left out;
 # a plain "modrinth.com" would desync them too. "^" means exact host.
-for domain in '^modrinth.com' 'steamcloud-frf.s3.dualstack.eu-central-1.amazonaws.com'; do
+for domain in '^modrinth.com' 'steamcloud-frf.s3.dualstack.eu-central-1.amazonaws.com' \
+              'scdn.co' 'spotify.com'; do
   grep -qxF -- "$domain" "$LISTS_DIR/list-general-user.txt" \
     || printf '%s\n' "$domain" >> "$LISTS_DIR/list-general-user.txt"
 done
